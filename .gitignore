@@ -3,6 +3,7 @@ node_modules/
 logs/
 screenshots/
 .tmp-site/
+release/
 *.log
 .env
 .env.*

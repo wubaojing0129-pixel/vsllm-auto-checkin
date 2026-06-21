@@ -483,16 +483,44 @@ function New-NpmCommand {
   $drawLimit = [int]$script:DrawLimitBox.Value
   $watchInterval = [int]$script:IntervalBox.Value
   $escapedRoot = $script:RootDir.Replace("'", "''")
-  $runLine = "npm --silent run $ScriptName"
+  $scriptArgs = switch ($ScriptName) {
+    'login' { @('src/vsllm-auto.js', '--login') }
+    'login:auto' { @('src/vsllm-auto.js', '--login-auto') }
+    'login:browser' { @('src/vsllm-auto.js', '--login-browser') }
+    'run' { @('src/vsllm-auto.js') }
+    'run:headed' { @('src/vsllm-auto.js', '--headed') }
+    'api' { @('src/vsllm-api.js') }
+    'api:balance' { @('src/vsllm-api.js', '--balance') }
+    'api:watch' { @('src/vsllm-api.js', '--watch') }
+    'api:headed' { @('src/vsllm-api.js', '--headed') }
+    'watch' { @('src/vsllm-auto.js', '--watch') }
+    'watch:headed' { @('src/vsllm-auto.js', '--watch', '--headed') }
+    default { @() }
+  }
+
+  if ($scriptArgs.Count -gt 0) {
+    $quotedArgs = ($scriptArgs | ForEach-Object { "'$($_.Replace("'", "''"))'" }) -join ' '
+    $runLine = "& `$nodeExe $quotedArgs"
+  } else {
+    $runLine = "npm --silent run $ScriptName"
+  }
+
   if ($RedirectPath) {
     $escapedRedirectPath = $RedirectPath.Replace("'", "''")
-    $runLine = "npm --silent run $ScriptName 2>&1 | ForEach-Object { Add-Content -LiteralPath '$escapedRedirectPath' -Value `$_.ToString() -Encoding UTF8 }"
+    $runLine = "$runLine 2>&1 | ForEach-Object { Add-Content -LiteralPath '$escapedRedirectPath' -Value `$_.ToString() -Encoding UTF8 }"
   }
 
   @"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 `$OutputEncoding = [System.Text.Encoding]::UTF8
 Set-Location -LiteralPath '$escapedRoot'
+`$bundledNode = Join-Path '$escapedRoot' 'runtime\node.exe'
+if (Test-Path -LiteralPath `$bundledNode) {
+  `$nodeExe = `$bundledNode
+} else {
+  `$nodeCommand = Get-Command node -ErrorAction Stop
+  `$nodeExe = `$nodeCommand.Source
+}
 `$env:VSLLM_DRAW_LIMIT = '$drawLimit'
 `$env:VSLLM_WATCH_INTERVAL_MINUTES = '$watchInterval'
 `$env:VSLLM_WATCH_BUFFER_SECONDS = '10'
@@ -506,6 +534,39 @@ $runLine
 "@
 }
 
+function Test-RuntimeReady {
+  $bundledNode = Join-Path $script:RootDir 'runtime\node.exe'
+  $hasBundledNode = Test-Path -LiteralPath $bundledNode
+  $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
+  $npmCommand = Get-Command npm -ErrorAction SilentlyContinue
+  $installBat = Join-Path $script:RootDir 'VSLLM-安装依赖.bat'
+
+  if (-not $hasBundledNode -and -not $nodeCommand) {
+    $message = "未检测到 Node.js，也没有找到包内 runtime\node.exe。`r`n`r`n请先安装 Node.js 18 或更高版本，然后重新打开本工具。`r`n官网：https://nodejs.org/"
+    Append-Log '运行环境检查失败：未检测到 Node.js，也没有找到包内 runtime/node.exe。'
+    Show-ErrorMessage '缺少运行环境' $message
+    return $false
+  }
+
+  $playwrightPackage = Join-Path $script:RootDir 'node_modules\playwright\package.json'
+  if (-not (Test-Path -LiteralPath $playwrightPackage)) {
+    $installAliasBat = Join-Path $script:RootDir 'Install-Dependencies.bat'
+    if (-not $npmCommand) {
+      $message = "还没有安装项目依赖，并且未检测到 npm。`r`n`r`n请先安装 Node.js 18 或更高版本，再双击运行：`r`n$installBat`r`n或：`r`n$installAliasBat"
+      Append-Log '运行环境检查失败：未检测到 node_modules/playwright，也未检测到 npm。'
+      Show-ErrorMessage '缺少项目依赖' $message
+      return $false
+    }
+
+    $message = "还没有安装项目依赖。`r`n`r`n请先双击运行：`r`n$installBat`r`n或：`r`n$installAliasBat`r`n`r`n安装完成后再重新打开 VSLLM-Launcher.bat。"
+    Append-Log '运行环境检查失败：未检测到 node_modules/playwright，请先安装依赖。'
+    Show-ErrorMessage '缺少项目依赖' $message
+    return $false
+  }
+
+  return $true
+}
+
 function Invoke-VisibleNpmScript {
   param(
     [string]$ScriptName,
@@ -513,6 +574,10 @@ function Invoke-VisibleNpmScript {
   )
 
   Show-MainWindow
+
+  if (-not (Test-RuntimeReady)) {
+    return
+  }
 
   [System.Windows.Forms.MessageBox]::Show(
     "即将打开一个前台命令窗口。请按窗口提示完成登录。`r`n`r`n如果遇到 Google 不安全浏览器提示，请确认使用的是新的普通浏览器登录流程。",
@@ -571,6 +636,10 @@ function Invoke-NpmScript {
     [string]$ScriptName,
     [string]$Title
   )
+
+  if (-not (Test-RuntimeReady)) {
+    return
+  }
 
   if ($script:CurrentProcess -and -not $script:CurrentProcess.HasExited) {
     Append-Log '已有任务正在运行，请先停止或等待结束。'
@@ -1006,6 +1075,10 @@ function Invoke-WatchCheck {
 function Start-WatchMode {
   if ($script:CurrentProcess -and -not $script:CurrentProcess.HasExited) {
     Append-Log '已有任务正在运行，请先停止或等待结束。'
+    return
+  }
+
+  if (-not (Test-RuntimeReady)) {
     return
   }
 
