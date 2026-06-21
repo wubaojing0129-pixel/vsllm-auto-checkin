@@ -1,0 +1,16 @@
+node_modules/
+.auth/
+logs/
+screenshots/
+.tmp-site/
+*.log
+.env
+.env.*
+*.tmp
+*.pid
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+playwright-report/
+test-results/
+CODEX_CONTEXT.md

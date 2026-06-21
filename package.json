@@ -1,0 +1,23 @@
+{
+  "name": "vsllm-auto-checkin",
+  "version": "1.0.0",
+  "private": true,
+  "description": "后台自动执行 vsllm.com 每日签到和抽奖",
+  "type": "module",
+  "scripts": {
+    "login": "node src/vsllm-auto.js --login",
+    "login:auto": "node src/vsllm-auto.js --login-auto",
+    "login:browser": "node src/vsllm-auto.js --login-browser",
+    "run": "node src/vsllm-auto.js",
+    "run:headed": "node src/vsllm-auto.js --headed",
+    "api": "node src/vsllm-api.js",
+    "api:balance": "node src/vsllm-api.js --balance",
+    "api:watch": "node src/vsllm-api.js --watch",
+    "api:headed": "node src/vsllm-api.js --headed",
+    "watch": "node src/vsllm-auto.js --watch",
+    "watch:headed": "node src/vsllm-auto.js --watch --headed"
+  },
+  "dependencies": {
+    "playwright": "^1.54.2"
+  }
+}
