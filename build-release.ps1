@@ -24,11 +24,46 @@ $commonItems = @(
   'src'
 )
 
+function ConvertFrom-CodePoints {
+  param([int[]]$CodePoints)
+  return -join ($CodePoints | ForEach-Object { [char]$_ })
+}
+
+function Join-NameParts {
+  param(
+    [string]$Prefix,
+    [int[]]$CodePoints,
+    [string]$Suffix
+  )
+
+  return $Prefix + (ConvertFrom-CodePoints $CodePoints) + $Suffix
+}
+
+$batItems = @(
+  'VSLLM-Launcher.bat',
+  (Join-NameParts 'VSLLM-' @(0x5B89, 0x88C5, 0x4F9D, 0x8D56) '.bat'),
+  (Join-NameParts 'VSLLM-' @(0x9996, 0x6B21, 0x767B, 0x5F55) '.bat'),
+  (Join-NameParts 'VSLLM-API' @(0x7FFB, 0x724C, 0x4E00, 0x6B21) '.bat'),
+  (Join-NameParts 'VSLLM-' @(0x540E, 0x53F0, 0x5B88, 0x5019) '.bat'),
+  (Join-NameParts 'VSLLM-' @(0x505C, 0x6B62, 0x540E, 0x53F0, 0x5B88, 0x5019) '.bat'),
+  (Join-NameParts 'VSLLM-' @(0x6E05, 0x7406, 0x6B8B, 0x7559, 0x767B, 0x5F55) '.bat'),
+  'Install-Dependencies.bat',
+  'First-Login.bat',
+  'Run-Once.bat',
+  'Start-Watch.bat',
+  'Stop-Watch.bat',
+  'Clean-Login.bat'
+)
+
+$textItems = @(
+  (Join-NameParts '' @(0x7FA4, 0x53CB, 0x4F7F, 0x7528, 0x8BF4, 0x660E) '.txt')
+)
+
 function Copy-CommonItems {
   param([string]$TargetDir)
 
   New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null
-  foreach ($item in $commonItems) {
+  foreach ($item in ($commonItems + $batItems + $textItems)) {
     $source = Join-Path $root $item
     if (-not (Test-Path -LiteralPath $source)) {
       throw "Missing release item: $item"
@@ -37,16 +72,6 @@ function Copy-CommonItems {
     $destination = Join-Path $TargetDir $item
     Copy-Item -LiteralPath $source -Destination $destination -Recurse -Force
   }
-
-  Get-ChildItem -LiteralPath $root -File -Filter '*.bat' |
-    ForEach-Object {
-      Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $TargetDir $_.Name) -Force
-    }
-
-  Get-ChildItem -LiteralPath $root -File -Filter '*.txt' |
-    ForEach-Object {
-      Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $TargetDir $_.Name) -Force
-    }
 }
 
 function Add-PortableRuntime {
@@ -54,7 +79,7 @@ function Add-PortableRuntime {
 
   $nodeModules = Join-Path $root 'node_modules'
   if (-not (Test-Path -LiteralPath (Join-Path $nodeModules 'playwright\package.json'))) {
-    throw 'node_modules/playwright was not found. Run VSLLM-安装依赖.bat or npm install before building portable package.'
+    throw 'node_modules/playwright was not found. Run Install-Dependencies.bat or npm ci before building portable package.'
   }
 
   Copy-Item -LiteralPath $nodeModules -Destination (Join-Path $TargetDir 'node_modules') -Recurse -Force

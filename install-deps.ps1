@@ -41,10 +41,10 @@ try {
   }
 
   Write-Host ''
-  Write-Host '正在安装项目依赖，请稍等...'
-  & npm install
+  Write-Host '正在按 package-lock.json 安装项目依赖，请稍等...'
+  & npm ci
   if ($LASTEXITCODE -ne 0) {
-    throw "npm install 失败，退出码：$LASTEXITCODE"
+    throw "npm ci 失败，退出码：$LASTEXITCODE"
   }
 
   Write-Host ''

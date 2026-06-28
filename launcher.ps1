@@ -409,8 +409,9 @@ function Stop-ProjectWatchProcesses {
     $matches = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
       $_.ProcessId -ne $PID -and
       $_.CommandLine -and
+      $_.CommandLine -match $escapedRoot -and
       (
-        ($_.CommandLine -match $escapedRoot -and $_.CommandLine -match 'api:watch') -or
+        $_.CommandLine -match 'api:watch' -or
         $_.CommandLine -match 'vsllm-api\.js\s+--watch'
       )
     }
@@ -545,6 +546,25 @@ function Test-RuntimeReady {
     $message = "未检测到 Node.js，也没有找到包内 runtime\node.exe。`r`n`r`n请先安装 Node.js 18 或更高版本，然后重新打开本工具。`r`n官网：https://nodejs.org/"
     Append-Log '运行环境检查失败：未检测到 Node.js，也没有找到包内 runtime/node.exe。'
     Show-ErrorMessage '缺少运行环境' $message
+    return $false
+  }
+
+  $nodeExe = if ($hasBundledNode) { $bundledNode } else { $nodeCommand.Source }
+  try {
+    $nodeVersionText = (& $nodeExe --version 2>$null).Trim()
+    $majorText = $nodeVersionText.TrimStart('v').Split('.')[0]
+    $major = 0
+    [void][int]::TryParse($majorText, [ref]$major)
+    if ($major -lt 18) {
+      $message = "当前 Node.js 版本太低：$nodeVersionText`r`n`r`n请升级到 Node.js 18 或更高版本，或者使用带 runtime 的免安装版。"
+      Append-Log ("运行环境检查失败：Node.js 版本过低：{0}" -f $nodeVersionText)
+      Show-ErrorMessage 'Node.js 版本过低' $message
+      return $false
+    }
+  } catch {
+    $message = "无法检测 Node.js 版本。`r`n`r`n路径：$nodeExe`r`n错误：$($_.Exception.Message)"
+    Append-Log ("运行环境检查失败：无法检测 Node.js 版本：{0}" -f $_.Exception.Message)
+    Show-ErrorMessage 'Node.js 检查失败' $message
     return $false
   }
 
