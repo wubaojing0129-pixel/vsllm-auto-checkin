@@ -58,6 +58,8 @@ npx playwright install chromium
 VSLLM-Launcher.bat
 ```
 
+其他首次登录、签到一次、开始/停止守护操作都在控制台按钮里完成，不需要再打开多个入口文件。
+
 第一次使用：
 
 1. 点击 `首次登录`。
@@ -176,8 +178,11 @@ npm run api:watch
 ```text
 .
 ├─ VSLLM-Launcher.bat          # 推荐入口，打开控制台
+├─ Install-Dependencies.bat    # 英文安装入口，文件名乱码时也能用
+├─ VSLLM-安装依赖.bat          # 中文安装入口
 ├─ launcher.ps1                # Windows Forms 图形控制台
 ├─ start-launcher.ps1          # 启动器辅助脚本
+├─ install-deps.ps1            # 依赖安装/修复脚本
 ├─ stop-login-browser.ps1      # 清理登录浏览器辅助脚本
 ├─ src/
 │  ├─ vsllm-api.js             # 后台 API 签到、抽奖、余额、守护逻辑
@@ -211,8 +216,8 @@ npm run api:watch
 
 说明登录浏览器或登录命令窗口还在运行。先关闭浏览器窗口，再回到命令窗口按 `Enter`。如果找不到窗口，可以运行：
 
-```text
-VSLLM-清理残留登录.bat
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\stop-login-browser.ps1
 ```
 
 ### 守护没有马上抽奖

@@ -427,7 +427,6 @@ function Stop-ProjectWatchProcesses {
 function Stop-AllTasks {
   Stop-WatchMode
   Stop-CurrentTask
-  Stop-LegacyBackgroundWatch
   Stop-ProjectWatchProcesses
 }
 
@@ -800,7 +799,7 @@ function Set-StartupGuard {
 
   $shortcutPath = Get-StartupShortcutPath
   if ($Enabled) {
-    $targetPath = Join-Path $script:RootDir 'VSLLM-后台守候.bat'
+    $targetPath = Join-Path $script:RootDir 'VSLLM-Launcher.bat'
     if (-not (Test-Path -LiteralPath $targetPath)) {
       Show-ErrorMessage '启用失败' ("找不到启动文件：`r`n{0}" -f $targetPath)
       return
@@ -810,6 +809,7 @@ function Set-StartupGuard {
       $shell = New-Object -ComObject WScript.Shell
       $shortcut = $shell.CreateShortcut($shortcutPath)
       $shortcut.TargetPath = $targetPath
+      $shortcut.Arguments = 'watch'
       $shortcut.WorkingDirectory = $script:RootDir
       $shortcut.Description = '开机后启动 VSLLM 签到+抽奖控制台并开始守护'
       $shortcut.IconLocation = "$env:SystemRoot\System32\shell32.dll,44"

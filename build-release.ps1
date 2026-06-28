@@ -17,10 +17,7 @@ $commonItems = @(
   'launcher.ps1',
   'start-launcher.ps1',
   'install-deps.ps1',
-  'start-watch-background.ps1',
-  'stop-watch-background.ps1',
   'stop-login-browser.ps1',
-  'watch-background-worker.ps1',
   'src'
 )
 
@@ -42,17 +39,7 @@ function Join-NameParts {
 $batItems = @(
   'VSLLM-Launcher.bat',
   (Join-NameParts 'VSLLM-' @(0x5B89, 0x88C5, 0x4F9D, 0x8D56) '.bat'),
-  (Join-NameParts 'VSLLM-' @(0x9996, 0x6B21, 0x767B, 0x5F55) '.bat'),
-  (Join-NameParts 'VSLLM-API' @(0x7FFB, 0x724C, 0x4E00, 0x6B21) '.bat'),
-  (Join-NameParts 'VSLLM-' @(0x540E, 0x53F0, 0x5B88, 0x5019) '.bat'),
-  (Join-NameParts 'VSLLM-' @(0x505C, 0x6B62, 0x540E, 0x53F0, 0x5B88, 0x5019) '.bat'),
-  (Join-NameParts 'VSLLM-' @(0x6E05, 0x7406, 0x6B8B, 0x7559, 0x767B, 0x5F55) '.bat'),
-  'Install-Dependencies.bat',
-  'First-Login.bat',
-  'Run-Once.bat',
-  'Start-Watch.bat',
-  'Stop-Watch.bat',
-  'Clean-Login.bat'
+  'Install-Dependencies.bat'
 )
 
 $textItems = @(

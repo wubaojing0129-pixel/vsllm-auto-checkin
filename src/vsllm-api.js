@@ -1082,7 +1082,7 @@ async function main() {
 
   try {
     if (isProfileBrowserRunning()) {
-      throw new Error('检测到首次登录浏览器或登录命令窗口仍在运行。请先关闭登录浏览器窗口，并在登录命令窗口按 Enter；如果找不到窗口，请运行 VSLLM-清理残留登录.bat。');
+      throw new Error('检测到首次登录浏览器或登录命令窗口仍在运行。请先关闭登录浏览器窗口，并在登录命令窗口按 Enter；如果找不到窗口，请运行控制台里的“清理残留登录”，或运行 stop-login-browser.ps1。');
     }
 
     const browserLaunchOptions = await getBrowserLaunchOptions();

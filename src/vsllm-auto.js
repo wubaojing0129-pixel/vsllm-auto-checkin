@@ -125,7 +125,7 @@ async function claimLoginLock() {
   const existing = await readFile(loginLockPath, 'utf8').catch(() => '');
   const existingPid = Number.parseInt(existing, 10);
   if (await processIsRunning(existingPid)) {
-    log(`检测到已有首次登录流程还在运行，PID=${existingPid}。请先完成那个窗口，或运行“VSLLM-清理残留登录.bat”。`);
+    log(`检测到已有首次登录流程还在运行，PID=${existingPid}。请先完成那个窗口，或运行控制台里的“清理残留登录”，也可以运行 stop-login-browser.ps1。`);
     process.exitCode = 3;
     return false;
   }
