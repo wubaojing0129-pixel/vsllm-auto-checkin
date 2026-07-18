@@ -2,7 +2,7 @@
   "name": "vsllm-auto-checkin",
   "version": "1.0.0",
   "private": true,
-  "description": "后台自动执行 vsllm.com 每日签到和抽奖",
+  "description": "后台自动执行 vsllm.com 每日签到、今日任务和抽奖",
   "type": "module",
   "scripts": {
     "login": "node src/vsllm-auto.js --login",

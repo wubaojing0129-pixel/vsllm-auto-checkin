@@ -11,6 +11,7 @@ const logDir = path.join(rootDir, 'logs');
 const drawHistoryPath = path.join(logDir, 'draw-history.log');
 const drawStatePath = path.join(logDir, 'draw-state.json');
 const checkInHistoryPath = path.join(logDir, 'checkin-history.log');
+const dailyTaskAnswersPath = path.join(logDir, 'daily-task-answers.json');
 const browserExecutableCandidates = [
   process.env.VSLLM_BROWSER_EXECUTABLE,
   process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Google', 'Chrome', 'Application', 'chrome.exe'),
@@ -32,10 +33,20 @@ const isWatchMode = args.has('--watch');
 const isBalanceMode = args.has('--balance');
 const headed = args.has('--headed') || process.env.VSLLM_HEADLESS === 'false';
 const summaryOnly = process.env.VSLLM_SUMMARY_ONLY === '1';
+const dailyTasksEnabled = readBooleanFlag(process.env.VSLLM_DAILY_TASKS, true);
+const dailyTaskAdLimit = readPositiveInteger(process.env.VSLLM_TASK_AD_LIMIT, 3);
+const dailyTaskQuizAttempts = readPositiveInteger(process.env.VSLLM_TASK_QUIZ_ATTEMPTS, 8);
 
 function readPositiveInteger(value, fallback) {
   const parsed = Number.parseInt(value || '', 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function readBooleanFlag(value, fallback) {
+  if (value == null || value === '') {
+    return fallback;
+  }
+  return !/^(0|false|off|no)$/i.test(String(value).trim());
 }
 
 function readBufferSeconds() {
@@ -52,7 +63,7 @@ function nowText() {
 }
 
 function log(message) {
-  if (summaryOnly && !/签到日志|抽奖日志|余额日志|API运行失败|失败|错误|未检测到|检测到首次登录|请先|没有/.test(message)) {
+  if (summaryOnly && !/签到日志|抽奖日志|余额日志|今日任务|API运行失败|失败|错误|未检测到|检测到首次登录|请先|没有/.test(message)) {
     return;
   }
   console.log(`[${nowText()}] ${message}`);
@@ -831,8 +842,8 @@ async function preparePageContext(context, options = {}) {
   };
 }
 
-async function apiPost(context, auth, endpoint) {
-  const response = await context.request.post(`${baseUrl}${endpoint}`, {
+async function apiPost(context, auth, endpoint, data = undefined) {
+  const requestOptions = {
     headers: {
       Accept: 'application/json, text/plain, */*',
       Origin: baseUrl,
@@ -842,7 +853,12 @@ async function apiPost(context, auth, endpoint) {
       Cookie: auth.cookieHeader
     },
     timeout: 30000
-  });
+  };
+  if (data !== undefined) {
+    requestOptions.data = data;
+  }
+
+  const response = await context.request.post(`${baseUrl}${endpoint}`, requestOptions);
 
   const text = await response.text();
   let json = null;
@@ -934,6 +950,283 @@ async function readAndSaveBalance(context) {
   return accountBalance;
 }
 
+async function readDailyTaskAnswers() {
+  try {
+    const raw = await readFile(dailyTaskAnswersPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+async function writeDailyTaskAnswers(answers) {
+  await writeFile(dailyTaskAnswersPath, `${JSON.stringify(answers, null, 2)}\n`, 'utf8');
+}
+
+function isApiSuccess(result) {
+  return Boolean(result?.ok && result.json?.success);
+}
+
+function getDailyTaskData(result) {
+  return isApiSuccess(result) ? (result.json.data || null) : null;
+}
+
+async function readGwentStatus(context, auth) {
+  const result = await apiGet(context, auth, '/api/gwent/status').catch((error) => {
+    log(`今日任务：读取状态失败：${error?.message || error}`);
+    return null;
+  });
+  const status = getDailyTaskData(result);
+  if (!status && result) {
+    log(`今日任务：状态接口未返回可用数据：${summarize(stringifyPayload(result), 160)}`);
+  }
+  return status;
+}
+
+function describeTaskReward(task) {
+  const amount = Number(task?.reward_amount || 0);
+  switch (task?.reward_type) {
+    case 'charge':
+      return `充能 +${amount} 次`;
+    case 'extra_draw':
+      return `抽奖券 +${amount} 张`;
+    case 'quota':
+      return `额度 +${formatNumber(amount)}`;
+    default:
+      return `奖励 +${amount}`;
+  }
+}
+
+async function claimCompletedModelTasks(context, auth, initialStatus) {
+  let status = initialStatus;
+  let claimed = 0;
+
+  for (let index = 0; index < 8; index += 1) {
+    const task = status?.tasks?.task1;
+    if (!task || task.all_done || !Array.isArray(task.tiers) || task.tiers.length === 0) {
+      break;
+    }
+
+    const step = Number(task.current_step || 0);
+    const tier = task.tiers[step];
+    const ready = tier && Number(task.current_count || 0) >= Number(tier.target_count || 0);
+    if (!ready) {
+      break;
+    }
+
+    const result = await apiPost(context, auth, '/api/gwent/task/claim', { task_id: 'model_usage' });
+    if (!isApiSuccess(result)) {
+      log(`今日任务：模型使用任务领奖失败：${summarize(stringifyPayload(result), 180)}`);
+      break;
+    }
+
+    claimed += 1;
+    log(`今日任务：模型使用任务第 ${step + 1} 阶段已自动领奖（${describeTaskReward(tier)}）。`);
+    status = await readGwentStatus(context, auth) || status;
+  }
+
+  const task = status?.tasks?.task1;
+  if (claimed === 0 && task && !task.all_done) {
+    const step = Number(task.current_step || 0);
+    const tier = Array.isArray(task.tiers) ? task.tiers[step] : null;
+    if (tier) {
+      log(`今日任务：模型使用进度 ${Number(task.current_count || 0)}/${Number(tier.target_count || 0)}，未达标不产生付费调用。`);
+    }
+  }
+  return status;
+}
+
+function quizQuestionKey(question) {
+  const text = String(question?.text || '').replace(/\s+/g, ' ').trim();
+  const options = Array.isArray(question?.options)
+    ? question.options.map((option) => String(option).replace(/\s+/g, ' ').trim())
+    : [];
+  return JSON.stringify([text, options]);
+}
+
+function chooseQuizAnswer(question, answerCache) {
+  const options = Array.isArray(question?.options) ? question.options : [];
+  if (options.length === 0) {
+    return { key: '', answerIndex: -1, entry: null };
+  }
+
+  const key = quizQuestionKey(question);
+  const entry = answerCache[key] && typeof answerCache[key] === 'object'
+    ? answerCache[key]
+    : { correct_index: null, rejected_indexes: [] };
+  const correctIndex = entry.correct_index == null ? Number.NaN : Number(entry.correct_index);
+  if (Number.isInteger(correctIndex) && correctIndex >= 0 && correctIndex < options.length) {
+    return { key, answerIndex: correctIndex, entry };
+  }
+
+  const rejected = new Set(Array.isArray(entry.rejected_indexes) ? entry.rejected_indexes.map(Number) : []);
+  let answerIndex = options.findIndex((_, index) => !rejected.has(index));
+  if (answerIndex < 0) {
+    answerIndex = 0;
+    entry.rejected_indexes = [];
+  }
+  return { key, answerIndex, entry };
+}
+
+async function runQuizTask(context, auth, initialStatus) {
+  let status = initialStatus;
+  let task = status?.tasks?.task3;
+  if (!task) {
+    return status;
+  }
+  if (task.suspended) {
+    log('今日任务：每日答题暂停中，跳过。');
+    return status;
+  }
+  if (task.status === 'won') {
+    log('今日任务：每日答题今天已经答对，跳过。');
+    return status;
+  }
+
+  const answerCache = await readDailyTaskAnswers();
+  let attemptsMade = 0;
+  let stoppedEarly = false;
+  for (let attempt = 1; attempt <= dailyTaskQuizAttempts; attempt += 1) {
+    attemptsMade = attempt;
+    const startResult = await apiPost(context, auth, '/api/gwent/task3/start');
+    const started = getDailyTaskData(startResult);
+    const question = started?.question;
+    if (!question) {
+      log(`今日任务：每日答题开始失败：${summarize(stringifyPayload(startResult), 180)}`);
+      stoppedEarly = true;
+      break;
+    }
+
+    const choice = chooseQuizAnswer(question, answerCache);
+    if (choice.answerIndex < 0) {
+      log('今日任务：题目没有可选答案，跳过。');
+      stoppedEarly = true;
+      break;
+    }
+
+    const answerResult = await apiPost(context, auth, '/api/gwent/task3/answer', {
+      answer_index: choice.answerIndex
+    });
+    const answered = getDailyTaskData(answerResult);
+    if (!answered) {
+      log(`今日任务：第 ${attempt} 次提交答案失败：${summarize(stringifyPayload(answerResult), 180)}`);
+      stoppedEarly = true;
+      break;
+    }
+
+    if (answered.correct) {
+      choice.entry.correct_index = choice.answerIndex;
+      choice.entry.rejected_indexes = [];
+      answerCache[choice.key] = choice.entry;
+      await writeDailyTaskAnswers(answerCache);
+      log(`今日任务：每日答题第 ${attempt} 次答对，${describeTaskReward(task)} 已到账。`);
+      status = await readGwentStatus(context, auth) || status;
+      return status;
+    }
+
+    const rejected = new Set(Array.isArray(choice.entry.rejected_indexes) ? choice.entry.rejected_indexes.map(Number) : []);
+    rejected.add(choice.answerIndex);
+    choice.entry.correct_index = null;
+    choice.entry.rejected_indexes = [...rejected].sort((a, b) => a - b);
+    answerCache[choice.key] = choice.entry;
+    await writeDailyTaskAnswers(answerCache);
+    log(`今日任务：每日答题第 ${attempt} 次未答对，已记住错误选项并准备重试。`);
+    await sleep(1000);
+  }
+
+  if (!stoppedEarly && attemptsMade >= dailyTaskQuizAttempts) {
+    log(`今日任务：每日答题本轮达到 ${dailyTaskQuizAttempts} 次尝试上限，下轮继续学习题库。`);
+  }
+  return await readGwentStatus(context, auth) || status;
+}
+
+async function runAdTask(context, auth, initialStatus) {
+  let status = initialStatus;
+  let completed = 0;
+
+  while (completed < dailyTaskAdLimit) {
+    const task = status?.tasks?.task2;
+    if (!task) {
+      break;
+    }
+    if (task.suspended) {
+      log('今日任务：广告奖励暂停中，跳过。');
+      break;
+    }
+
+    const remaining = Math.max(0, Number(task.daily_cap || 0) - Number(task.done_count || 0));
+    if (remaining <= 0) {
+      log('今日任务：广告奖励今天已经全部完成。');
+      break;
+    }
+
+    const waitSeconds = Math.max(0, Number(task.next_available_at || 0) - Math.floor(Date.now() / 1000));
+    if (waitSeconds > 0) {
+      log(`今日任务：广告奖励冷却中，约 ${formatDuration(waitSeconds * 1000)} 后可继续。`);
+      break;
+    }
+
+    const startResult = await apiPost(context, auth, '/api/gwent/ad/start');
+    const started = getDailyTaskData(startResult);
+    if (!started) {
+      log(`今日任务：广告开始失败：${summarize(stringifyPayload(startResult), 180)}`);
+      break;
+    }
+
+    const durationSeconds = Math.max(0, Number(started.duration_sec || 15));
+    log(`今日任务：正在观看站内任务内容，等待 ${durationSeconds} 秒后领取。`);
+    await sleep(durationSeconds * 1000 + 1200);
+
+    const claimResult = await apiPost(context, auth, '/api/gwent/ad/claim');
+    if (!isApiSuccess(claimResult)) {
+      log(`今日任务：广告奖励领取失败：${summarize(stringifyPayload(claimResult), 180)}`);
+      break;
+    }
+
+    completed += 1;
+    log(`今日任务：广告奖励第 ${completed} 次领取成功（${describeTaskReward(task)}）。`);
+    status = await readGwentStatus(context, auth) || status;
+  }
+
+  return status;
+}
+
+function getDailyTaskDelayMs(status) {
+  const task = status?.tasks?.task2;
+  if (!task || task.suspended) {
+    return null;
+  }
+  const remaining = Math.max(0, Number(task.daily_cap || 0) - Number(task.done_count || 0));
+  const nextAvailableAt = Number(task.next_available_at || 0);
+  if (remaining <= 0 || nextAvailableAt <= 0) {
+    return null;
+  }
+  return Math.max(0, nextAvailableAt * 1000 - Date.now());
+}
+
+async function runDailyTasks(context, auth) {
+  if (!dailyTasksEnabled) {
+    log('今日任务：自动执行已关闭。');
+    return { status: null, changed: false, nextDelayMs: null };
+  }
+
+  let status = await readGwentStatus(context, auth);
+  if (!status?.tasks) {
+    log('今日任务：页面当前没有可执行的任务数据。');
+    return { status, changed: false, nextDelayMs: getDailyTaskDelayMs(status) };
+  }
+
+  log('今日任务：开始检查模型任务领奖、每日答题和广告奖励。');
+  const before = JSON.stringify(status.tasks);
+  status = await claimCompletedModelTasks(context, auth, status);
+  status = await runQuizTask(context, auth, status);
+  status = await runAdTask(context, auth, status);
+  const changed = before !== JSON.stringify(status?.tasks || null);
+  log(`今日任务：本轮检查完成${changed ? '，任务状态已更新。' : '，没有新的可完成任务。'}`);
+  return { status, changed, nextDelayMs: getDailyTaskDelayMs(status) };
+}
+
 async function runApiCycle(context) {
   const auth = await prepareAuth(context);
   const apiBalance = await readApiBalance(context, auth).catch((error) => {
@@ -945,6 +1238,8 @@ async function runApiCycle(context) {
     log(`余额日志：当前${accountBalance.displayText}`);
   }
 
+  const dailyTasks = await runDailyTasks(context, auth);
+
   await apiPost(context, auth, '/api/gwent/share_unlock').catch((error) => {
     log(`API /api/gwent/share_unlock 失败：${error.message}`);
     return null;
@@ -955,7 +1250,19 @@ async function runApiCycle(context) {
   let cooldownText = auth.pageCooldownText || '';
   let status = 'not-run';
   const prizes = [];
-  const initialDrawStatus = auth.pageDrawStatus || {};
+  const gwentStatus = dailyTasks.status;
+  const apiAvailableDraws = gwentStatus
+    ? Math.max(0, Number(gwentStatus.charges_current || 0) + Number(gwentStatus.extra_draws_left || 0))
+    : null;
+  const initialDrawStatus = apiAvailableDraws == null
+    ? (auth.pageDrawStatus || {})
+    : {
+        ...(auth.pageDrawStatus || {}),
+        available: apiAvailableDraws,
+        remaining: apiAvailableDraws,
+        total: Number(gwentStatus.charges_max || auth.pageDrawStatus?.total || 0),
+        raw: `${apiAvailableDraws}/${Number(gwentStatus.charges_max || auth.pageDrawStatus?.total || 0)} 次`
+      };
   const maxDrawAttempts = initialDrawStatus.remaining == null
     ? drawLimit
     : Math.min(drawLimit, Math.max(initialDrawStatus.remaining, 0));
@@ -1034,7 +1341,10 @@ async function runApiCycle(context) {
   const prizeText = prizes.length ? `，结果=${prizes.join('；')}` : '';
   log(`API翻牌完成：请求次数=${attempts}，状态=${status}${prizeText}`);
   const finishedAt = new Date();
-  const nextDelayMs = getNextWatchDelay({ draws: { cooldownMs } });
+  const nextDelayMs = getNextWatchDelay({
+    draws: { cooldownMs },
+    dailyTasks: { nextDelayMs: dailyTasks.nextDelayMs }
+  });
   await updateDrawStatePatch({
     lastRunAt: isoTime(finishedAt),
     lastCooldownMs: Number.isFinite(cooldownMs) && cooldownMs > 0 ? cooldownMs : null,
@@ -1045,16 +1355,20 @@ async function runApiCycle(context) {
     lastPrizes: prizes,
     accountBalance
   });
-  return { draws: { attempts, cooldownMs, status, prizes } };
+  return {
+    draws: { attempts, cooldownMs, status, prizes },
+    dailyTasks: { nextDelayMs: dailyTasks.nextDelayMs }
+  };
 }
 
 function getNextWatchDelay(result) {
   const fallbackMs = watchIntervalMinutes * 60 * 1000;
   const bufferMs = watchBufferSeconds * 1000;
-  const cooldownMs = result?.draws?.cooldownMs;
+  const candidates = [result?.draws?.cooldownMs, result?.dailyTasks?.nextDelayMs]
+    .filter((value) => Number.isFinite(value) && value > 0);
 
-  if (Number.isFinite(cooldownMs) && cooldownMs > 0) {
-    return Math.max(cooldownMs + bufferMs, 60 * 1000);
+  if (candidates.length > 0) {
+    return Math.max(Math.min(...candidates) + bufferMs, 60 * 1000);
   }
 
   return fallbackMs + bufferMs;
