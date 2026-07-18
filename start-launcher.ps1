@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 
 $root = $env:VSLLM_LAUNCHER_ROOT
 if (-not $root) {
