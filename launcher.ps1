@@ -238,7 +238,7 @@ function Hide-ToTray {
   $script:Form.ShowInTaskbar = $false
 
   if ($script:TrayIcon -and -not $script:TrayMessageShown) {
-    $script:TrayIcon.BalloonTipTitle = 'VSLLM 签到+抽奖控制台'
+    $script:TrayIcon.BalloonTipTitle = 'VSLLM 签到+任务+抽奖控制台'
     $script:TrayIcon.BalloonTipText = '控制台已常驻右下角托盘。双击图标可以重新打开。'
     $script:TrayIcon.ShowBalloonTip(3000)
     $script:TrayMessageShown = $true
@@ -814,7 +814,7 @@ function Set-StartupGuard {
       $shortcut.TargetPath = $targetPath
       $shortcut.Arguments = 'watch'
       $shortcut.WorkingDirectory = $script:RootDir
-      $shortcut.Description = '开机后启动 VSLLM 签到+抽奖控制台并开始守护'
+      $shortcut.Description = '开机后启动 VSLLM 签到+任务+抽奖控制台并开始守护'
       $shortcut.IconLocation = "$env:SystemRoot\System32\shell32.dll,44"
       $shortcut.Save()
       Append-Log '已启用开机守护：下次登录 Windows 后会自动打开控制台并开始守护。'
@@ -1192,7 +1192,7 @@ function Invoke-StartupAction {
 }
 
 $script:Form = New-Object System.Windows.Forms.Form
-$script:Form.Text = 'VSLLM 签到+抽奖控制台'
+$script:Form.Text = 'VSLLM 签到+任务+抽奖控制台'
 $script:Form.StartPosition = 'CenterScreen'
 $script:Form.Size = New-Object System.Drawing.Size(980, 700)
 $script:Form.MinimumSize = New-Object System.Drawing.Size(900, 660)
@@ -1236,7 +1236,7 @@ $exitMenuItem.Add_Click({ Exit-Launcher })
 
 $script:TrayIcon = New-Object System.Windows.Forms.NotifyIcon
 $script:TrayIcon.Icon = [System.Drawing.SystemIcons]::Application
-$script:TrayIcon.Text = 'VSLLM 签到+抽奖控制台'
+$script:TrayIcon.Text = 'VSLLM 签到+任务+抽奖控制台'
 $script:TrayIcon.ContextMenuStrip = $script:TrayMenu
 $script:TrayIcon.Visible = $true
 $script:TrayIcon.Add_DoubleClick({ Show-MainWindow })
@@ -1262,7 +1262,7 @@ $script:ActionRequestTimer.Add_Tick({ Process-ExternalActionRequest })
 $script:ActionRequestTimer.Start()
 
 $titleLabel = New-Object System.Windows.Forms.Label
-$titleLabel.Text = 'VSLLM 签到+抽奖控制台'
+$titleLabel.Text = 'VSLLM 签到+任务+抽奖控制台'
 $titleLabel.Font = New-Font 16 ([System.Drawing.FontStyle]::Bold)
 $titleLabel.AutoSize = $true
 $titleLabel.Location = New-Object System.Drawing.Point(18, 16)
