@@ -998,43 +998,41 @@ function describeTaskReward(task) {
   }
 }
 
-async function claimCompletedModelTasks(context, auth, initialStatus) {
-  let status = initialStatus;
-  let claimed = 0;
-
-  for (let index = 0; index < 8; index += 1) {
-    const task = status?.tasks?.task1;
-    if (!task || task.all_done || !Array.isArray(task.tiers) || task.tiers.length === 0) {
-      break;
-    }
-
-    const step = Number(task.current_step || 0);
-    const tier = task.tiers[step];
-    const ready = tier && Number(task.current_count || 0) >= Number(tier.target_count || 0);
-    if (!ready) {
-      break;
-    }
-
-    const result = await apiPost(context, auth, '/api/gwent/task/claim', { task_id: 'model_usage' });
-    if (!isApiSuccess(result)) {
-      log(`今日任务：模型使用任务领奖失败：${summarize(stringifyPayload(result), 180)}`);
-      break;
-    }
-
-    claimed += 1;
-    log(`今日任务：模型使用任务第 ${step + 1} 阶段已自动领奖（${describeTaskReward(tier)}）。`);
-    status = await readGwentStatus(context, auth) || status;
-  }
-
+function getReadyModelTaskTier(status) {
   const task = status?.tasks?.task1;
-  if (claimed === 0 && task && !task.all_done) {
-    const step = Number(task.current_step || 0);
-    const tier = Array.isArray(task.tiers) ? task.tiers[step] : null;
-    if (tier) {
-      log(`今日任务：模型使用进度 ${Number(task.current_count || 0)}/${Number(tier.target_count || 0)}，未达标不产生付费调用。`);
-    }
+  if (!task || task.all_done || !Array.isArray(task.tiers) || task.tiers.length === 0) {
+    return null;
   }
-  return status;
+
+  const step = Number(task.current_step || 0);
+  const tier = task.tiers[step];
+  if (!tier || Number(task.current_count || 0) < Number(tier.target_count || 0)) {
+    return null;
+  }
+
+  return { task, tier, step };
+}
+
+async function claimNextCompletedModelTask(context, auth, initialStatus) {
+  const ready = getReadyModelTaskTier(initialStatus);
+  if (!ready) {
+    return { status: initialStatus, performed: false, stateFresh: true, blocked: false };
+  }
+
+  const result = await apiPost(context, auth, '/api/gwent/task/claim', { task_id: 'model_usage' });
+  if (!isApiSuccess(result)) {
+    log(`今日任务：模型使用任务领奖失败：${summarize(stringifyPayload(result), 180)}`);
+    return { status: initialStatus, performed: false, stateFresh: true, blocked: true };
+  }
+
+  log(`今日任务：模型使用任务第 ${ready.step + 1} 阶段已自动领奖（${describeTaskReward(ready.tier)}）。`);
+  const refreshed = await readGwentStatus(context, auth);
+  return {
+    status: refreshed || initialStatus,
+    performed: true,
+    stateFresh: Boolean(refreshed),
+    blocked: false
+  };
 }
 
 function quizQuestionKey(question) {
@@ -1071,17 +1069,9 @@ function chooseQuizAnswer(question, answerCache) {
 
 async function runQuizTask(context, auth, initialStatus) {
   let status = initialStatus;
-  let task = status?.tasks?.task3;
-  if (!task) {
-    return status;
-  }
-  if (task.suspended) {
-    log('今日任务：每日答题暂停中，跳过。');
-    return status;
-  }
-  if (task.status === 'won') {
-    log('今日任务：每日答题今天已经答对，跳过。');
-    return status;
+  const task = status?.tasks?.task3;
+  if (!task || task.suspended || task.status === 'won') {
+    return { status, performed: false, stateFresh: true, blocked: false };
   }
 
   const answerCache = await readDailyTaskAnswers();
@@ -1121,8 +1111,13 @@ async function runQuizTask(context, auth, initialStatus) {
       answerCache[choice.key] = choice.entry;
       await writeDailyTaskAnswers(answerCache);
       log(`今日任务：每日答题第 ${attempt} 次答对，${describeTaskReward(task)} 已到账。`);
-      status = await readGwentStatus(context, auth) || status;
-      return status;
+      const refreshed = await readGwentStatus(context, auth);
+      return {
+        status: refreshed || status,
+        performed: true,
+        stateFresh: Boolean(refreshed),
+        blocked: false
+      };
     }
 
     const rejected = new Set(Array.isArray(choice.entry.rejected_indexes) ? choice.entry.rejected_indexes.map(Number) : []);
@@ -1138,58 +1133,78 @@ async function runQuizTask(context, auth, initialStatus) {
   if (!stoppedEarly && attemptsMade >= dailyTaskQuizAttempts) {
     log(`今日任务：每日答题本轮达到 ${dailyTaskQuizAttempts} 次尝试上限，下轮继续学习题库。`);
   }
-  return await readGwentStatus(context, auth) || status;
+  const refreshed = await readGwentStatus(context, auth);
+  return {
+    status: refreshed || status,
+    performed: attemptsMade > 0,
+    stateFresh: Boolean(refreshed),
+    blocked: stoppedEarly
+  };
 }
 
-async function runAdTask(context, auth, initialStatus) {
-  let status = initialStatus;
-  let completed = 0;
+function isAdTaskReady(status, nowSeconds = Math.floor(Date.now() / 1000)) {
+  const task = status?.tasks?.task2;
+  if (!task || task.suspended) {
+    return false;
+  }
+  const remaining = Math.max(0, Number(task.daily_cap || 0) - Number(task.done_count || 0));
+  return remaining > 0 && Number(task.next_available_at || 0) <= nowSeconds;
+}
 
-  while (completed < dailyTaskAdLimit) {
-    const task = status?.tasks?.task2;
-    if (!task) {
-      break;
-    }
-    if (task.suspended) {
-      log('今日任务：广告奖励暂停中，跳过。');
-      break;
-    }
+function isQuizTaskReady(status) {
+  const task = status?.tasks?.task3;
+  return Boolean(task && !task.suspended && task.status !== 'won');
+}
 
-    const remaining = Math.max(0, Number(task.daily_cap || 0) - Number(task.done_count || 0));
-    if (remaining <= 0) {
-      log('今日任务：广告奖励今天已经全部完成。');
-      break;
-    }
-
-    const waitSeconds = Math.max(0, Number(task.next_available_at || 0) - Math.floor(Date.now() / 1000));
-    if (waitSeconds > 0) {
-      log(`今日任务：广告奖励冷却中，约 ${formatDuration(waitSeconds * 1000)} 后可继续。`);
-      break;
-    }
-
-    const startResult = await apiPost(context, auth, '/api/gwent/ad/start');
-    const started = getDailyTaskData(startResult);
-    if (!started) {
-      log(`今日任务：广告开始失败：${summarize(stringifyPayload(startResult), 180)}`);
-      break;
-    }
-
-    const durationSeconds = Math.max(0, Number(started.duration_sec || 15));
-    log(`今日任务：正在观看站内任务内容，等待 ${durationSeconds} 秒后领取。`);
-    await sleep(durationSeconds * 1000 + 1200);
-
-    const claimResult = await apiPost(context, auth, '/api/gwent/ad/claim');
-    if (!isApiSuccess(claimResult)) {
-      log(`今日任务：广告奖励领取失败：${summarize(stringifyPayload(claimResult), 180)}`);
-      break;
-    }
-
-    completed += 1;
-    log(`今日任务：广告奖励第 ${completed} 次领取成功（${describeTaskReward(task)}）。`);
-    status = await readGwentStatus(context, auth) || status;
+async function runSingleAdTask(context, auth, initialStatus) {
+  const task = initialStatus?.tasks?.task2;
+  if (!isAdTaskReady(initialStatus)) {
+    return { status: initialStatus, performed: false, stateFresh: true, blocked: false };
   }
 
-  return status;
+  const startResult = await apiPost(context, auth, '/api/gwent/ad/start');
+  const started = getDailyTaskData(startResult);
+  if (!started) {
+    log(`今日任务：广告开始失败：${summarize(stringifyPayload(startResult), 180)}`);
+    return { status: initialStatus, performed: false, stateFresh: true, blocked: true };
+  }
+
+  const durationSeconds = Math.max(0, Number(started.duration_sec || 15));
+  log(`今日任务：正在观看站内任务内容，等待 ${durationSeconds} 秒后领取。`);
+  await sleep(durationSeconds * 1000 + 1200);
+
+  const claimResult = await apiPost(context, auth, '/api/gwent/ad/claim');
+  if (!isApiSuccess(claimResult)) {
+    log(`今日任务：广告奖励领取失败：${summarize(stringifyPayload(claimResult), 180)}`);
+    return { status: initialStatus, performed: false, stateFresh: true, blocked: true };
+  }
+
+  log(`今日任务：广告奖励领取成功（${describeTaskReward(task)}）。`);
+  const refreshed = await readGwentStatus(context, auth);
+  return {
+    status: refreshed || initialStatus,
+    performed: true,
+    stateFresh: Boolean(refreshed),
+    blocked: false
+  };
+}
+
+function getAvailableDrawCount(status, fallback = null) {
+  if (status) {
+    return Math.max(0, Number(status.charges_current || 0) + Number(status.extra_draws_left || 0));
+  }
+  return Number.isFinite(fallback) ? Math.max(0, Number(fallback)) : 0;
+}
+
+function getGwentStatusCooldownMs(status) {
+  if (!status || getAvailableDrawCount(status) > 0) {
+    return null;
+  }
+  const nextChargeAt = Number(status.next_charge_at || 0);
+  if (nextChargeAt <= 0) {
+    return null;
+  }
+  return Math.max(0, nextChargeAt * 1000 - Date.now());
 }
 
 function getDailyTaskDelayMs(status) {
@@ -1205,26 +1220,70 @@ function getDailyTaskDelayMs(status) {
   return Math.max(0, nextAvailableAt * 1000 - Date.now());
 }
 
-async function runDailyTasks(context, auth) {
-  if (!dailyTasksEnabled) {
-    log('今日任务：自动执行已关闭。');
-    return { status: null, changed: false, nextDelayMs: null };
+function chooseNextAutomationAction({
+  availableDraws,
+  attempts,
+  attemptLimit,
+  tasksEnabled,
+  modelTaskReady,
+  adTaskReady,
+  quizTaskReady
+}) {
+  if (attempts >= attemptLimit) {
+    return 'stop';
+  }
+  if (availableDraws > 0) {
+    return 'draw';
+  }
+  if (!tasksEnabled) {
+    return 'stop';
+  }
+  if (modelTaskReady) {
+    return 'model-task';
+  }
+  if (adTaskReady) {
+    return 'ad-task';
+  }
+  if (quizTaskReady) {
+    return 'quiz-task';
+  }
+  return 'stop';
+}
+
+function minPositiveDelay(...values) {
+  const candidates = values.filter((value) => Number.isFinite(value) && value > 0);
+  return candidates.length > 0 ? Math.min(...candidates) : null;
+}
+
+function logDailyTaskRemainder(status) {
+  const modelTask = status?.tasks?.task1;
+  if (modelTask && !modelTask.all_done) {
+    const step = Number(modelTask.current_step || 0);
+    const tier = Array.isArray(modelTask.tiers) ? modelTask.tiers[step] : null;
+    if (tier && Number(modelTask.current_count || 0) < Number(tier.target_count || 0)) {
+      log(`今日任务：模型使用进度 ${Number(modelTask.current_count || 0)}/${Number(tier.target_count || 0)}，未达标不产生付费调用。`);
+    }
   }
 
-  let status = await readGwentStatus(context, auth);
-  if (!status?.tasks) {
-    log('今日任务：页面当前没有可执行的任务数据。');
-    return { status, changed: false, nextDelayMs: getDailyTaskDelayMs(status) };
+  const adTask = status?.tasks?.task2;
+  if (adTask) {
+    const remaining = Math.max(0, Number(adTask.daily_cap || 0) - Number(adTask.done_count || 0));
+    const waitSeconds = Math.max(0, Number(adTask.next_available_at || 0) - Math.floor(Date.now() / 1000));
+    if (adTask.suspended) {
+      log('今日任务：广告奖励暂停中。');
+    } else if (remaining <= 0) {
+      log('今日任务：广告奖励今天已经全部完成。');
+    } else if (waitSeconds > 0) {
+      log(`今日任务：广告奖励冷却中，约 ${formatDuration(waitSeconds * 1000)} 后可继续。`);
+    }
   }
 
-  log('今日任务：开始检查模型任务领奖、每日答题和广告奖励。');
-  const before = JSON.stringify(status.tasks);
-  status = await claimCompletedModelTasks(context, auth, status);
-  status = await runQuizTask(context, auth, status);
-  status = await runAdTask(context, auth, status);
-  const changed = before !== JSON.stringify(status?.tasks || null);
-  log(`今日任务：本轮检查完成${changed ? '，任务状态已更新。' : '，没有新的可完成任务。'}`);
-  return { status, changed, nextDelayMs: getDailyTaskDelayMs(status) };
+  const quizTask = status?.tasks?.task3;
+  if (quizTask?.suspended) {
+    log('今日任务：每日答题暂停中。');
+  } else if (quizTask?.status === 'won') {
+    log('今日任务：每日答题今天已经答对。');
+  }
 }
 
 async function runApiCycle(context) {
@@ -1238,7 +1297,16 @@ async function runApiCycle(context) {
     log(`余额日志：当前${accountBalance.displayText}`);
   }
 
-  const dailyTasks = await runDailyTasks(context, auth);
+  let gwentStatus = await readGwentStatus(context, auth);
+  if (dailyTasksEnabled) {
+    if (gwentStatus?.tasks) {
+      log('今日任务：启用防浪费流程；有次数先抽，每次只补一个任务奖励，到账后立即抽。');
+    } else {
+      log('今日任务：没有读取到任务状态，本轮只按现有翻牌次数执行。');
+    }
+  } else {
+    log('今日任务：自动执行已关闭。');
+  }
 
   await apiPost(context, auth, '/api/gwent/share_unlock').catch((error) => {
     log(`API /api/gwent/share_unlock 失败：${error.message}`);
@@ -1248,102 +1316,188 @@ async function runApiCycle(context) {
   let attempts = 0;
   let cooldownMs = auth.pageCooldownMs ?? null;
   let cooldownText = auth.pageCooldownText || '';
-  let status = 'not-run';
+  let drawStatus = 'not-run';
+  let fallbackAvailable = gwentStatus
+    ? null
+    : (auth.pageDrawStatus?.remaining == null ? drawLimit : Number(auth.pageDrawStatus.remaining));
   const prizes = [];
-  const gwentStatus = dailyTasks.status;
-  const apiAvailableDraws = gwentStatus
-    ? Math.max(0, Number(gwentStatus.charges_current || 0) + Number(gwentStatus.extra_draws_left || 0))
-    : null;
-  const initialDrawStatus = apiAvailableDraws == null
-    ? (auth.pageDrawStatus || {})
-    : {
-        ...(auth.pageDrawStatus || {}),
-        available: apiAvailableDraws,
-        remaining: apiAvailableDraws,
-        total: Number(gwentStatus.charges_max || auth.pageDrawStatus?.total || 0),
-        raw: `${apiAvailableDraws}/${Number(gwentStatus.charges_max || auth.pageDrawStatus?.total || 0)} 次`
-      };
-  const maxDrawAttempts = initialDrawStatus.remaining == null
-    ? drawLimit
-    : Math.min(drawLimit, Math.max(initialDrawStatus.remaining, 0));
   const drawState = await readDrawState();
   drawState.totalAttempts = Math.max(drawState.totalAttempts, await countSuccessfulDrawHistory());
+  const taskProgress = {
+    modelClaims: 0,
+    modelBlocked: false,
+    adCompletions: 0,
+    adBlocked: false,
+    quizAttempted: false
+  };
 
-  if (initialDrawStatus.raw) {
-    log(`抽奖日志：页面显示本轮次数 ${initialDrawStatus.raw}，本次最多尝试 ${maxDrawAttempts} 次。`);
+  const initialAvailable = getAvailableDrawCount(gwentStatus, fallbackAvailable);
+  const capacity = Number(gwentStatus?.charges_max || auth.pageDrawStatus?.total || 0);
+  log(`抽奖日志：本轮开始时可用次数 ${initialAvailable}${capacity > 0 ? `/${capacity}` : ''}，单轮最多尝试 ${drawLimit} 次。`);
+
+  while (attempts < drawLimit) {
+    const availableDraws = getAvailableDrawCount(gwentStatus, fallbackAvailable);
+    const action = chooseNextAutomationAction({
+      availableDraws,
+      attempts,
+      attemptLimit: drawLimit,
+      tasksEnabled: dailyTasksEnabled && Boolean(gwentStatus?.tasks),
+      modelTaskReady: !taskProgress.modelBlocked && taskProgress.modelClaims < 8 && Boolean(getReadyModelTaskTier(gwentStatus)),
+      adTaskReady: !taskProgress.adBlocked && taskProgress.adCompletions < dailyTaskAdLimit && isAdTaskReady(gwentStatus),
+      quizTaskReady: !taskProgress.quizAttempted && isQuizTaskReady(gwentStatus)
+    });
+
+    if (action === 'draw') {
+      const result = await apiPost(context, auth, '/api/gwent/draw');
+      attempts += 1;
+
+      if (responseMeansAuthExpired(result)) {
+        await updateDrawStatePatch({
+          lastRunAt: isoTime(new Date()),
+          lastCooldownMs: null,
+          lastCooldownText: '',
+          nextDelayMs: null,
+          nextRunAt: null,
+          lastStatus: 'auth-expired',
+          lastPrizes: prizes
+        });
+        await recordDrawHistory('抽奖日志：登录状态失效，请重新点击“首次登录”。');
+        throw new Error('登录状态已失效或接口返回 Unauthorized。请在控制台点击“首次登录”重新登录。');
+      }
+
+      drawStatus = result.ok ? 'requested' : 'http-error';
+      const resultCooldownMs = responseCooldownMs(result);
+      const resultText = summarize(stringifyPayload(result), 180);
+      const prize = getDrawPrize(result);
+
+      if (prize) {
+        const prizeText = describePrize(prize);
+        prizes.push(prizeText);
+        drawState.totalAttempts += 1;
+        await writeDrawState(drawState);
+        await recordDrawHistory(`抽奖日志：本轮第 ${attempts} 次 / 累计 ${drawState.totalAttempts} 次：${prizeText}`);
+      }
+
+      if (!result.ok || (!prize && responseMeansStop(result))) {
+        if (resultCooldownMs) {
+          cooldownMs = resultCooldownMs;
+          cooldownText = resultText;
+        }
+        if (!prize) {
+          const attemptText = attempts > 1 ? `第 ${attempts} 次尝试` : '本轮';
+          if (resultCooldownMs || cooldownMs) {
+            const nextTime = new Date(Date.now() + getNextWatchDelay({ draws: { cooldownMs } }));
+            await recordDrawHistory(`抽奖日志：${attemptText}被冷却挡住，预计 ${formatTime(nextTime)} 再试：${resultText || cooldownText}`);
+          } else {
+            await recordDrawHistory(`抽奖日志：${attemptText}未抽到新奖励：${resultText}`);
+          }
+        }
+        break;
+      }
+
+      await sleep(1200);
+      const refreshed = await readGwentStatus(context, auth);
+      if (refreshed) {
+        gwentStatus = refreshed;
+        fallbackAvailable = null;
+      } else {
+        fallbackAvailable = Math.max(0, availableDraws - 1);
+        gwentStatus = null;
+      }
+      continue;
+    }
+
+    if (action === 'model-task') {
+      taskProgress.modelClaims += 1;
+      const taskResult = await claimNextCompletedModelTask(context, auth, gwentStatus);
+      gwentStatus = taskResult.status;
+      taskProgress.modelBlocked = taskResult.blocked;
+      if (taskResult.performed && !taskResult.stateFresh) {
+        log('今日任务：领奖后未能刷新次数，为避免重复领奖，本轮停止补任务。');
+        break;
+      }
+      continue;
+    }
+
+    if (action === 'ad-task') {
+      const taskResult = await runSingleAdTask(context, auth, gwentStatus);
+      gwentStatus = taskResult.status;
+      taskProgress.adBlocked = taskResult.blocked;
+      if (taskResult.performed) {
+        taskProgress.adCompletions += 1;
+      }
+      if (taskResult.performed && !taskResult.stateFresh) {
+        log('今日任务：广告领奖后未能刷新次数，为避免重复领取，本轮停止补任务。');
+        break;
+      }
+      continue;
+    }
+
+    if (action === 'quiz-task') {
+      taskProgress.quizAttempted = true;
+      const taskResult = await runQuizTask(context, auth, gwentStatus);
+      gwentStatus = taskResult.status;
+      if (taskResult.performed && !taskResult.stateFresh) {
+        log('今日任务：答题后未能刷新次数，为避免错误判断，本轮停止补任务。');
+        break;
+      }
+      continue;
+    }
+
+    break;
   }
 
-  if (maxDrawAttempts <= 0) {
-    status = 'no-chance';
+  const finalRefresh = await readGwentStatus(context, auth);
+  if (finalRefresh) {
+    gwentStatus = finalRefresh;
+    fallbackAvailable = null;
+  }
+
+  const statusCooldownMs = getGwentStatusCooldownMs(gwentStatus);
+  if (Number.isFinite(statusCooldownMs) && statusCooldownMs > 0) {
+    cooldownMs = statusCooldownMs;
+    cooldownText = cooldownText || '接口显示充能冷却中';
+  }
+
+  const finalAvailable = getAvailableDrawCount(gwentStatus, fallbackAvailable);
+  if (attempts === 0 && finalAvailable <= 0) {
+    drawStatus = 'no-chance';
     if (cooldownMs) {
       const nextTime = new Date(Date.now() + getNextWatchDelay({ draws: { cooldownMs } }));
-      await recordDrawHistory(`抽奖日志：本轮次数已用完，预计 ${formatTime(nextTime)} 再试：${cooldownText || initialDrawStatus.raw || '页面显示无剩余次数'}`);
+      await recordDrawHistory(`抽奖日志：当前没有可用次数，预计 ${formatTime(nextTime)} 再试：${cooldownText || '等待充能刷新'}`);
     } else {
-      await recordDrawHistory(`抽奖日志：本轮次数已用完：${initialDrawStatus.raw || '页面显示无剩余次数'}`);
+      await recordDrawHistory('抽奖日志：当前没有可用次数。');
     }
-  }
-
-  for (let index = 0; index < maxDrawAttempts; index += 1) {
-    const result = await apiPost(context, auth, '/api/gwent/draw');
-    attempts += 1;
-
-    if (responseMeansAuthExpired(result)) {
-      await updateDrawStatePatch({
-        lastRunAt: isoTime(new Date()),
-        lastCooldownMs: null,
-        lastCooldownText: '',
-        nextDelayMs: null,
-        nextRunAt: null,
-        lastStatus: 'auth-expired',
-        lastPrizes: prizes
-      });
-      await recordDrawHistory('抽奖日志：登录状态失效，请重新点击“首次登录”。');
-      throw new Error('登录状态已失效或接口返回 Unauthorized。请在控制台点击“首次登录”重新登录。');
-    }
-
-    status = result.ok ? 'requested' : 'http-error';
-    const resultCooldownMs = responseCooldownMs(result);
-    const resultText = summarize(stringifyPayload(result), 180);
-
-    const prize = getDrawPrize(result);
-    if (prize) {
-      const prizeText = describePrize(prize);
-      prizes.push(prizeText);
-      drawState.totalAttempts += 1;
-      await writeDrawState(drawState);
-      await recordDrawHistory(`抽奖日志：本轮第 ${attempts} 次 / 累计 ${drawState.totalAttempts} 次：${prizeText}`);
-    }
-
-    if (!result.ok || (!prize && responseMeansStop(result))) {
-      if (resultCooldownMs) {
-        cooldownMs = resultCooldownMs;
-        cooldownText = resultText;
-      }
-      if (!prize) {
-        const attemptText = attempts > 1 ? `第 ${attempts} 次尝试` : '本轮';
-        if (resultCooldownMs || cooldownMs) {
-          const nextTime = new Date(Date.now() + getNextWatchDelay({ draws: { cooldownMs } }));
-          await recordDrawHistory(`抽奖日志：${attemptText}被冷却挡住，预计 ${formatTime(nextTime)} 再试：${resultText || cooldownText}`);
-        } else {
-          await recordDrawHistory(`抽奖日志：${attemptText}未抽到新奖励：${resultText}`);
-        }
-      }
-      break;
-    }
-
-    await sleep(1200);
   }
 
   if (attempts > 0 && prizes.length < attempts) {
     log(`抽奖日志：本轮请求 ${attempts} 次，成功记录 ${prizes.length} 次，请以历史记录和网页次数为准。`);
   }
 
+  let dailyTaskNextDelayMs = getDailyTaskDelayMs(gwentStatus);
+  const deferredWork = attempts >= drawLimit && (
+    finalAvailable > 0 || (
+      dailyTasksEnabled && Boolean(
+        getReadyModelTaskTier(gwentStatus) || isAdTaskReady(gwentStatus) || isQuizTaskReady(gwentStatus)
+      )
+    )
+  );
+  if (deferredWork) {
+    dailyTaskNextDelayMs = minPositiveDelay(dailyTaskNextDelayMs, 60 * 1000);
+    log(`抽奖日志：已达到单轮 ${drawLimit} 次限制，仍有可执行内容，约 1 分钟后继续，避免先领奖后浪费次数。`);
+  }
+
+  if (dailyTasksEnabled && gwentStatus?.tasks) {
+    logDailyTaskRemainder(gwentStatus);
+    log('今日任务：本轮防浪费检查完成。');
+  }
+
   const prizeText = prizes.length ? `，结果=${prizes.join('；')}` : '';
-  log(`API翻牌完成：请求次数=${attempts}，状态=${status}${prizeText}`);
+  log(`API翻牌完成：请求次数=${attempts}，状态=${drawStatus}${prizeText}`);
   const finishedAt = new Date();
   const nextDelayMs = getNextWatchDelay({
     draws: { cooldownMs },
-    dailyTasks: { nextDelayMs: dailyTasks.nextDelayMs }
+    dailyTasks: { nextDelayMs: dailyTaskNextDelayMs }
   });
   await updateDrawStatePatch({
     lastRunAt: isoTime(finishedAt),
@@ -1351,13 +1505,13 @@ async function runApiCycle(context) {
     lastCooldownText: cooldownText || '',
     nextDelayMs,
     nextRunAt: isoTime(new Date(finishedAt.getTime() + nextDelayMs)),
-    lastStatus: status,
+    lastStatus: drawStatus,
     lastPrizes: prizes,
     accountBalance
   });
   return {
-    draws: { attempts, cooldownMs, status, prizes },
-    dailyTasks: { nextDelayMs: dailyTasks.nextDelayMs }
+    draws: { attempts, cooldownMs, status: drawStatus, prizes },
+    dailyTasks: { nextDelayMs: dailyTaskNextDelayMs }
   };
 }
 
